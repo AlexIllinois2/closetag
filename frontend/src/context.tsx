@@ -1,11 +1,17 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api } from './api'
+import Modal from './components/Modal'
 import type { Config, RepoInfo, RepoSettings } from './types'
 
 export interface Toast {
   id: number
   kind: 'ok' | 'err'
   text: string
+}
+
+interface Question {
+  message: string
+  confirmText: string
 }
 
 interface AppCtx {
@@ -16,12 +22,18 @@ interface AppCtx {
   refreshRepos: () => Promise<void>
   config: Config | null
   refreshConfig: () => Promise<void>
-  /** Suffix / id rules of the currently selected repo. */
+  /** Suffix / info-parse rules of the currently selected repo. */
   repoSettings: RepoSettings | null
   refreshRepoSettings: (repoId?: string) => Promise<void>
   toasts: Toast[]
   toast: (kind: 'ok' | 'err', text: string) => void
   dismissToast: (id: number) => void
+  /**
+   * Ask before something destructive, answered by a dialog of the app itself.
+   * The browser's `confirm` can be silenced by a page setting, and a silenced one
+   * returns false: the button then looks dead with nothing said about why.
+   */
+  ask: (message: string, confirmText?: string) => Promise<boolean>
 }
 
 const Ctx = createContext<AppCtx | null>(null)
@@ -34,6 +46,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [config, setConfig] = useState<Config | null>(null)
   const [repoSettings, setRepoSettings] = useState<RepoSettings | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [question, setQuestion] = useState<Question | null>(null)
+  const answered = useRef<((ok: boolean) => void) | null>(null)
+
+  const ask = useCallback((message: string, confirmText = '删除') => {
+    // A question left open is answered 取消 by the next one.
+    answered.current?.(false)
+    setQuestion({ message, confirmText })
+    return new Promise<boolean>((resolve) => {
+      answered.current = resolve
+    })
+  }, [])
+
+  const answer = useCallback((ok: boolean) => {
+    answered.current?.(ok)
+    answered.current = null
+    setQuestion(null)
+  }, [])
 
   const toast = useCallback((kind: 'ok' | 'err', text: string) => {
     const id = Date.now() + Math.random()
@@ -117,9 +146,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
         toasts,
         toast,
         dismissToast,
+        ask,
       }}
     >
       {children}
+      {question && (
+        <Modal
+          title="确认"
+          width={440}
+          onClose={() => answer(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => answer(false)}>
+                取消
+              </button>
+              <button className="btn danger" onClick={() => answer(true)}>
+                {question.confirmText}
+              </button>
+            </>
+          }
+        >
+          <p className="muted">{question.message}</p>
+        </Modal>
+      )}
     </Ctx.Provider>
   )
 }

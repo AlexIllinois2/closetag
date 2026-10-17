@@ -1,13 +1,13 @@
 /** The part of a repo's settings that can be edited and persisted. */
 export interface RepoSettingsDraft {
   include_subfixs: string[]
-  id_gen_fns: IdGenFn[]
+  info_parse_fns: InfoParseFn[]
 }
 
 /**
- * Suffixes and id rules are stored per repo. A repo carries `using_global`
- * when it has never saved rules of its own and is inheriting the global
- * defaults from config.toml.
+ * Suffixes and info-parse rules are stored per repo. A repo carries
+ * `using_global` when it has never saved rules of its own and is inheriting the
+ * global defaults from config.toml.
  */
 export interface RepoSettings extends RepoSettingsDraft {
   using_global: boolean
@@ -24,7 +24,7 @@ export interface RepoInfo {
   group_count: number
   db_size: number
   last_scan: string | null
-  /** true when the repo inherits the global suffix/id rules */
+  /** true when the repo inherits the global suffix/info-parse rules */
   using_global: boolean
 }
 
@@ -44,8 +44,11 @@ export interface TagBrief {
 }
 
 export interface Item {
-  pk: number
-  id: string
+  id: number
+  /** parsed from the file name by the info-parse rules */
+  name: string
+  /** parsed from the file name by the info-parse rules (may be empty) */
+  auth: string
   path: string
   tags: TagBrief[]
   created_at: string
@@ -71,13 +74,15 @@ export interface TagGroup {
   updated_at: string
 }
 
-export interface IdGenFn {
+export interface InfoParseFn {
   /** optional regex matched against the repo-relative path */
   match?: string
-  /** delimiter used to split the path into arr */
+  /** delimiter used to split the file-name stem (extension stripped) into arr */
   split: string
-  /** template like "${arr[0]||arr[1]}" */
-  template: string
+  /** template rendered into `name`, e.g. "${arr[0]}" */
+  name: string
+  /** template rendered into `auth`, e.g. "${arr[1]}"; empty = no auth */
+  auth: string
 }
 
 export interface ServerConfig {
@@ -89,7 +94,7 @@ export interface ServerConfig {
 export interface Config {
   repo_paths: string[]
   include_subfixs: string[]
-  id_gen_fns: IdGenFn[]
+  info_parse_fns: InfoParseFn[]
   server: ServerConfig
 }
 
@@ -116,15 +121,17 @@ export interface ScanReport {
   duration_ms: number
 }
 
-export interface IdGenPreviewRule {
+export interface InfoParsePreviewRule {
   index: number
   matched: boolean
-  id: string | null
+  name: string | null
+  auth: string | null
 }
 
-export interface IdGenPreview {
-  id: string
+export interface InfoParsePreview {
+  name: string
+  auth: string
   rule_index: number | null
   used_fallback: boolean
-  rules: IdGenPreviewRule[]
+  rules: InfoParsePreviewRule[]
 }

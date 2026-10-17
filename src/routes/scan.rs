@@ -14,13 +14,13 @@ pub async fn scan(
         )));
     }
     let pool = state.pool_for(&repo_id)?;
-    // Suffixes and id rules are per repo; fall back to the global defaults
-    // only when this repo has none of its own.
+    // Suffixes and info-parse rules are per repo; fall back to the global
+    // defaults only when this repo has none of its own.
     let (suffixes, rules) = {
         let global = state.config.lock().unwrap().repo_defaults();
         let conn = pool.get()?;
         let (settings, _using_global) = crate::repo_settings::load(&conn, &global)?;
-        (settings.include_subfixs, settings.id_gen_fns)
+        (settings.include_subfixs, settings.info_parse_fns)
     };
     let root_path = std::path::PathBuf::from(&root);
     let report = web::block(move || -> anyhow::Result<crate::scanner::ScanReport> {

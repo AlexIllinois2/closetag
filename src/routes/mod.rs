@@ -121,6 +121,9 @@ pub fn config(cfg: &mut web::ServiceConfig) {
                 web::resource("/repos/{id}/scan").route(web::post().to(scan::scan)),
             )
             .service(
+                web::resource("/repos/{id}/export").route(web::get().to(repos::export)),
+            )
+            .service(
                 web::resource("/repos/{id}/settings")
                     .route(web::get().to(repos::get_settings))
                     .route(web::put().to(repos::put_settings))
@@ -142,16 +145,16 @@ pub fn config(cfg: &mut web::ServiceConfig) {
                     .route(web::post().to(items::create)),
             )
             .service(
-                web::resource("/repos/{id}/items/{pk}")
+                web::resource("/repos/{id}/items/{item_id}")
                     .route(web::put().to(items::update))
                     .route(web::delete().to(items::delete)),
             )
             .service(
-                web::resource("/repos/{id}/items/{pk}/tags")
+                web::resource("/repos/{id}/items/{item_id}/tags")
                     .route(web::post().to(items::add_tags)),
             )
             .service(
-                web::resource("/repos/{id}/items/{pk}/tags/{tag_id}")
+                web::resource("/repos/{id}/items/{item_id}/tags/{tag_id}")
                     .route(web::delete().to(items::remove_tag)),
             )
             .service(
@@ -175,7 +178,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             )
             .service(web::resource("/about").route(web::get().to(config_api::about)))
             .service(
-                web::resource("/idgen/preview").route(web::post().to(config_api::idgen_preview)),
+                web::resource("/infoparse/preview").route(web::post().to(config_api::infoparse_preview)),
             ),
     )
     .route("/ws", web::get().to(ws::ws))

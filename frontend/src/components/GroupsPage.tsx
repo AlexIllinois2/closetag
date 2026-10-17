@@ -7,7 +7,7 @@ import Modal from './Modal'
 import TagPicker from './TagPicker'
 
 export default function GroupsPage() {
-  const { currentRepoId, currentRepo, toast, refreshRepos } = useApp()
+  const { currentRepoId, currentRepo, toast, refreshRepos, ask } = useApp()
   const [groups, setGroups] = useState<TagGroup[]>([])
   const [tags, setTags] = useState<Tag[]>([])
   const [editing, setEditing] = useState<{ group: TagGroup | null } | null>(null)
@@ -29,7 +29,7 @@ export default function GroupsPage() {
 
   const remove = async (g: TagGroup) => {
     if (!currentRepoId) return
-    if (!confirm(`删除分组「${g.name}」？`)) return
+    if (!(await ask(`删除分组「${g.name}」？`))) return
     try {
       await api.deleteGroup(currentRepoId, g.id)
       toast('ok', '已删除')

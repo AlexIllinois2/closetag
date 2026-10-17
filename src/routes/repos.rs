@@ -1,9 +1,9 @@
 use super::{ApiError, json_ok};
-use crate::config::{self, IdGenFn};
+use crate::config::{self, InfoParseFn};
 use crate::db;
 use crate::repo_settings::{self, RepoSettings};
 use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use actix_web::{http::header, web, HttpResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -18,7 +18,7 @@ pub struct RepoInfo {
     pub group_count: i64,
     pub db_size: u64,
     pub last_scan: Option<String>,
-    /// true when this repo has no suffix/id rules of its own and is
+    /// true when this repo has no suffix/info-parse rules of its own and is
     /// inheriting the global defaults from config.toml.
     pub using_global: bool,
 }
@@ -147,11 +147,55 @@ pub async fn remove(
     Ok(json_ok(serde_json::json!({ "removed": path })))
 }
 
+/// A standalone copy of this repo's database, served as a download.
+///
+/// It is written with `VACUUM INTO` rather than copied file for file: SQLite keeps recent
+/// writes in the `-wal` sidecar, so the `.sqlite` on its own can be a shell with nothing
+/// scanned or tagged in it.
+pub async fn export(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    let id = path.into_inner();
+    let pool = state.pool_for(&id)?;
+    let conn = pool.get()?;
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_micros())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "closetag-export-{}-{since}.sqlite",
+        std::process::id()
+    ));
+    let file = tmp.to_string_lossy().to_string();
+    if let Err(error) = conn.execute("VACUUM INTO ?", [file.as_str()]) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ApiError::from(error));
+    }
+    let bytes = std::fs::read(&tmp).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        ApiError::bad(format!("cannot read the exported database: {error}"))
+    })?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok(HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .insert_header((
+            header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"{}.sqlite\"",
+                id.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+                    .collect::<String>()
+            ),
+        ))
+        .body(bytes))
+}
+
 /// The rules that govern one repo, plus the global defaults it can inherit.
 #[derive(Serialize)]
 pub struct RepoSettingsOut {
     pub include_subfixs: Vec<String>,
-    pub id_gen_fns: Vec<IdGenFn>,
+    pub info_parse_fns: Vec<InfoParseFn>,
     pub using_global: bool,
     pub global: RepoSettings,
 }
@@ -161,7 +205,7 @@ pub struct PutRepoSettings {
     #[serde(default)]
     pub include_subfixs: Vec<String>,
     #[serde(default)]
-    pub id_gen_fns: Vec<IdGenFn>,
+    pub info_parse_fns: Vec<InfoParseFn>,
 }
 
 pub async fn get_settings(
@@ -175,7 +219,7 @@ pub async fn get_settings(
     let (settings, using_global) = repo_settings::load(&conn, &global)?;
     Ok(json_ok(RepoSettingsOut {
         include_subfixs: settings.include_subfixs,
-        id_gen_fns: settings.id_gen_fns,
+        info_parse_fns: settings.info_parse_fns,
         using_global,
         global,
     }))
@@ -192,14 +236,14 @@ pub async fn put_settings(
     let conn = pool.get()?;
     let mut settings = RepoSettings {
         include_subfixs: body.include_subfixs.clone(),
-        id_gen_fns: body.id_gen_fns.clone(),
+        info_parse_fns: body.info_parse_fns.clone(),
     };
     settings.normalize();
     repo_settings::validate(&settings)?;
     repo_settings::save(&conn, &settings)?;
     Ok(json_ok(json!({
         "include_subfixs": settings.include_subfixs,
-        "id_gen_fns": settings.id_gen_fns,
+        "info_parse_fns": settings.info_parse_fns,
         "using_global": false,
     })))
 }
@@ -216,7 +260,7 @@ pub async fn reset_settings(
     let global = state.config.lock().unwrap().repo_defaults();
     Ok(json_ok(json!({
         "include_subfixs": global.include_subfixs,
-        "id_gen_fns": global.id_gen_fns,
+        "info_parse_fns": global.info_parse_fns,
         "using_global": true,
     })))
 }

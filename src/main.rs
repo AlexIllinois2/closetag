@@ -1,6 +1,6 @@
 mod config;
 mod db;
-mod idgen;
+mod infoparse;
 mod repo_settings;
 mod routes;
 mod scanner;

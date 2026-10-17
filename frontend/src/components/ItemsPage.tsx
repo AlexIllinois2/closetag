@@ -9,7 +9,7 @@ import TagPicker, { sortTagsTree, tagDepth } from './TagPicker'
 const PAGE = 100
 
 export default function ItemsPage() {
-  const { currentRepoId, currentRepo, toast, refreshRepos } = useApp()
+  const { currentRepoId, currentRepo, toast, refreshRepos, ask } = useApp()
   const [searchParams] = useSearchParams()
   const [tags, setTags] = useState<Tag[]>([])
   const [groups, setGroups] = useState<TagGroup[]>([])
@@ -23,7 +23,7 @@ export default function ItemsPage() {
   const [scanning, setScanning] = useState(false)
   const [editing, setEditing] = useState<Item | null>(null)
   const [creating, setCreating] = useState(false)
-  const [groupById, setGroupById] = useState(true)
+  const [groupByName, setGroupByName] = useState(true)
 
   // initial filters from URL (?tag=1&group=2)
   useEffect(() => {
@@ -92,9 +92,9 @@ export default function ItemsPage() {
 
   const removeItem = async (item: Item) => {
     if (!currentRepoId) return
-    if (!confirm(`删除条目「${item.path}」？其标签关联也会一并移除。`)) return
+    if (!(await ask(`删除条目「${item.path}」？其标签关联也会一并移除。`))) return
     try {
-      await api.deleteItem(currentRepoId, item.pk)
+      await api.deleteItem(currentRepoId, item.id)
       toast('ok', '已删除')
       await load()
       await refreshRepos()
@@ -106,7 +106,7 @@ export default function ItemsPage() {
   const removeTagFromItem = async (item: Item, tagId: number) => {
     if (!currentRepoId) return
     try {
-      await api.removeItemTag(currentRepoId, item.pk, tagId)
+      await api.removeItemTag(currentRepoId, item.id, tagId)
       await load()
     } catch (e) {
       toast('err', String(e))
@@ -122,9 +122,9 @@ export default function ItemsPage() {
     if (!page) return [] as [string, Item[]][]
     const m = new Map<string, Item[]>()
     for (const it of page.items) {
-      const arr = m.get(it.id) ?? []
+      const arr = m.get(it.name) ?? []
       arr.push(it)
-      m.set(it.id, arr)
+      m.set(it.name, arr)
     }
     return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   }, [page])
@@ -149,13 +149,17 @@ export default function ItemsPage() {
     )
   }
 
-  const renderRow = (item: Item, showId: boolean) => (
-    <tr key={item.pk}>
-      {showId && (
-        <td className="col-id">
-          <code>{item.id}</code>
-        </td>
+  const renderRow = (item: Item, mode: 'flat' | 'grouped') => (
+    <tr key={item.id}>
+      {mode === 'flat' && (
+        <>
+          <td className="col-id">
+            <code>{item.id}</code>
+          </td>
+          <td className="col-name">{item.name || <span className="muted">—</span>}</td>
+        </>
       )}
+      <td className="col-auth">{item.auth || <span className="muted">—</span>}</td>
       <td className="col-path">
         <code>{item.path}</code>
       </td>
@@ -190,7 +194,7 @@ export default function ItemsPage() {
       <div className="toolbar">
         <input
           className="input search"
-          placeholder="搜索路径 / id…"
+          placeholder="搜索路径 / name / auth…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -233,10 +237,10 @@ export default function ItemsPage() {
         <label className="checkbox-label">
           <input
             type="checkbox"
-            checked={groupById}
-            onChange={(e) => setGroupById(e.target.checked)}
+            checked={groupByName}
+            onChange={(e) => setGroupByName(e.target.checked)}
           />
-          按 id 分组
+          按 name 分组
         </label>
         <div className="toolbar-right">
           <button className="btn" onClick={() => void doScan()} disabled={scanning}>
@@ -265,22 +269,23 @@ export default function ItemsPage() {
         </div>
       )}
 
-      {groupById
-        ? grouped.map(([gid, items]) => (
-            <div key={gid} className="group-block">
+      {groupByName
+        ? grouped.map(([name, items]) => (
+            <div key={name} className="group-block">
               <div className="group-block-head">
-                <code>{gid}</code>
+                <code>{name}</code>
                 <span className="muted">{items.length} 个文件</span>
               </div>
               <table className="table">
                 <thead>
                   <tr>
+                    <th className="col-auth">auth</th>
                     <th className="col-path">路径</th>
                     <th>标签</th>
                     <th className="col-actions">操作</th>
                   </tr>
                 </thead>
-                <tbody>{items.map((it) => renderRow(it, false))}</tbody>
+                <tbody>{items.map((it) => renderRow(it, 'grouped'))}</tbody>
               </table>
             </div>
           ))
@@ -289,12 +294,14 @@ export default function ItemsPage() {
               <thead>
                 <tr>
                   <th className="col-id">ID</th>
+                  <th className="col-name">name</th>
+                  <th className="col-auth">auth</th>
                   <th className="col-path">路径</th>
                   <th>标签</th>
                   <th className="col-actions">操作</th>
                 </tr>
               </thead>
-              <tbody>{page?.items.map((it) => renderRow(it, true))}</tbody>
+              <tbody>{page?.items.map((it) => renderRow(it, 'flat'))}</tbody>
             </table>
           )}
 
@@ -369,7 +376,7 @@ function ItemModal({
     setSaving(true)
     try {
       if (item) {
-        await api.updateItem(repo, item.pk, { path: p, tags: selected })
+        await api.updateItem(repo, item.id, { path: p, tags: selected })
       } else {
         await api.createItem(repo, { path: p, tags: selected })
       }
@@ -413,7 +420,8 @@ function ItemModal({
         <TagPicker tags={tags} selected={selected} onChange={setSelected} />
       </div>
       <p className="muted small">
-        保存时会按当前 id_gen 规则重新生成 ID。也可以到 <NavLink to="/tags">标签页</NavLink> 管理标签树。
+        保存时会按当前 info_parse 规则从文件名重新解析 name / auth。也可以到{' '}
+        <NavLink to="/tags">标签页</NavLink> 管理标签树。
       </p>
     </Modal>
   )

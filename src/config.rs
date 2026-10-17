@@ -35,23 +35,28 @@ pub fn default_include_subfixs() -> Vec<String> {
     .collect()
 }
 
-pub fn default_id_gen_fns() -> Vec<IdGenFn> {
-    vec![IdGenFn {
+/// The rules a brand new repo starts with: filenames are usually
+/// "name - auth.suffix", "auth - name.suffix" or plain "name.suffix", so the
+/// default rule reads the first " - " segment as the name and the second as
+/// the auth (empty when the file has no second segment).
+pub fn default_info_parse_fns() -> Vec<InfoParseFn> {
+    vec![InfoParseFn {
         match_re: None,
-        split: "-".to_string(),
-        template: "${arr[0]||arr[1]}".to_string(),
+        split: " - ".to_string(),
+        name: "${arr[0]}".to_string(),
+        auth: "${arr[1]}".to_string(),
     }]
 }
 
 impl Config {
     /// The rules a newly added repo starts with.
     ///
-    /// Suffixes and id-gen rules are stored per repo (see `repo_settings`), so
-    /// the values here only act as a template applied at "add repo" time.
+    /// Suffixes and info-parse rules are stored per repo (see `repo_settings`),
+    /// so the values here only act as a template applied at "add repo" time.
     pub fn repo_defaults(&self) -> crate::repo_settings::RepoSettings {
         crate::repo_settings::RepoSettings {
             include_subfixs: self.include_subfixs.clone(),
-            id_gen_fns: self.id_gen_fns.clone(),
+            info_parse_fns: self.info_parse_fns.clone(),
         }
     }
 }
@@ -60,7 +65,7 @@ impl Config {
 pub fn default_repo_settings() -> crate::repo_settings::RepoSettings {
     crate::repo_settings::RepoSettings {
         include_subfixs: default_include_subfixs(),
-        id_gen_fns: default_id_gen_fns(),
+        info_parse_fns: default_info_parse_fns(),
     }
 }
 
@@ -77,20 +82,23 @@ pub fn normalize_suffix(s: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdGenFn {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoParseFn {
     /// Optional regex matched against the repo-relative path; the rule only applies when it matches.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "match")]
     pub match_re: Option<String>,
-    /// Delimiter used to split the relative path into `arr`.
+    /// Delimiter used to split the file-name stem (extension stripped) into `arr`.
     #[serde(default = "default_split")]
     pub split: String,
-    /// Template evaluated against `arr`, e.g. "${arr[0]||arr[1]}".
+    /// Template rendered into `name`, e.g. "${arr[0]}".
     #[serde(default)]
-    pub template: String,
+    pub name: String,
+    /// Template rendered into `auth`, e.g. "${arr[1]}". Empty = no auth.
+    #[serde(default)]
+    pub auth: String,
 }
 
-fn default_split() -> String {
+pub fn default_split() -> String {
     "-".to_string()
 }
 
@@ -132,10 +140,10 @@ pub struct Config {
     /// override it. Empty = include every file.
     #[serde(default = "default_include_subfixs")]
     pub include_subfixs: Vec<String>,
-    /// Default id rules handed to a newly added repo; each repo can then
-    /// override them.
-    #[serde(default = "default_id_gen_fns")]
-    pub id_gen_fns: Vec<IdGenFn>,
+    /// Default info-parse rules handed to a newly added repo; each repo can
+    /// then override them.
+    #[serde(default = "default_info_parse_fns")]
+    pub info_parse_fns: Vec<InfoParseFn>,
     #[serde(default)]
     pub server: ServerConfig,
 }
@@ -146,7 +154,7 @@ impl Default for Config {
         Self {
             repo_paths: Vec::new(),
             include_subfixs: rules.include_subfixs,
-            id_gen_fns: rules.id_gen_fns,
+            info_parse_fns: rules.info_parse_fns,
             server: ServerConfig::default(),
         }
     }
@@ -285,8 +293,8 @@ mod tests {
         save(&dir, &cfg).expect("保存配置");
         let loaded = load(&dir).expect("加载配置");
         assert_eq!(loaded.server.port, DEFAULT_PORT);
-        assert_eq!(loaded.id_gen_fns.len(), 1);
-        assert_eq!(loaded.id_gen_fns[0].split, "-");
+        assert_eq!(loaded.info_parse_fns.len(), 1);
+        assert_eq!(loaded.info_parse_fns[0].split, " - ");
         assert!(loaded.include_subfixs.contains(&".rs".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -294,18 +302,18 @@ mod tests {
     #[test]
     fn test_validate_rejects_bad_rules() {
         let mut cfg = Config::default();
-        cfg.id_gen_fns[0].match_re = Some("(".to_string());
+        cfg.info_parse_fns[0].match_re = Some("(".to_string());
         assert!(cfg.validate().is_err(), "非法正则应被拒绝");
 
-        cfg.id_gen_fns[0].match_re = None;
-        cfg.id_gen_fns[0].template = "${arr[0}".to_string();
+        cfg.info_parse_fns[0].match_re = None;
+        cfg.info_parse_fns[0].name = "${arr[0}".to_string();
         assert!(cfg.validate().is_err(), "未闭合模板应被拒绝");
 
-        cfg.id_gen_fns[0].template = "${arr[0]||arr[1]}".to_string();
-        cfg.id_gen_fns[0].split = "".to_string();
+        cfg.info_parse_fns[0].name = "${arr[0]}".to_string();
+        cfg.info_parse_fns[0].split = "".to_string();
         assert!(cfg.validate().is_err(), "空的 split 应被拒绝");
 
-        cfg.id_gen_fns[0].split = "-".to_string();
+        cfg.info_parse_fns[0].split = " - ".to_string();
         assert!(cfg.validate().is_ok(), "正常配置应通过");
     }
 }

@@ -1,5 +1,5 @@
 use super::{ApiError, json_ok};
-use crate::config::{self, Config, IdGenFn};
+use crate::config::{self, Config, InfoParseFn};
 use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
@@ -50,17 +50,17 @@ pub async fn about(state: web::Data<AppState>) -> Result<HttpResponse, ApiError>
 }
 
 #[derive(Deserialize)]
-pub struct IdGenPreviewReq {
+pub struct InfoParsePreviewReq {
     pub path: String,
     /// Rules to evaluate; when omitted the rules of `repo` (or the global
     /// defaults) are used.
-    pub rules: Option<Vec<IdGenFn>>,
+    pub rules: Option<Vec<InfoParseFn>>,
     pub repo: Option<String>,
 }
 
-pub async fn idgen_preview(
+pub async fn infoparse_preview(
     state: web::Data<AppState>,
-    body: web::Json<IdGenPreviewReq>,
+    body: web::Json<InfoParsePreviewReq>,
 ) -> Result<HttpResponse, ApiError> {
     let rules = match &body.rules {
         Some(r) if !r.is_empty() => r.clone(),
@@ -70,32 +70,33 @@ pub async fn idgen_preview(
                 let conn = pool.get()?;
                 let global = state.config.lock().unwrap().repo_defaults();
                 let (settings, _using_global) = crate::repo_settings::load(&conn, &global)?;
-                settings.id_gen_fns
+                settings.info_parse_fns
             }
-            None => state.config.lock().unwrap().id_gen_fns.clone(),
+            None => state.config.lock().unwrap().info_parse_fns.clone(),
         },
     };
     let rel = body.path.trim().replace('\\', "/");
     if rel.is_empty() {
         return Err(ApiError::bad("path is empty"));
     }
-    let result = crate::idgen::generate_id(&rel, &rules);
+    let result = crate::infoparse::parse_info(&rel, &rules);
     let mut per_rule = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
-        let matched = match &rule.match_re {
-            Some(re) => regex::Regex::new(re).map(|r| r.is_match(&rel)).unwrap_or(false),
-            None => true,
+        let (matched, name, auth) = match crate::infoparse::eval_rule(&rel, rule) {
+            Some((n, a)) => (true, Some(n), Some(a)),
+            None => {
+                let matched = match &rule.match_re {
+                    Some(re) => regex::Regex::new(re).map(|r| r.is_match(&rel)).unwrap_or(false),
+                    None => true,
+                };
+                (matched, None, None)
+            }
         };
-        let id = if matched && !rule.template.trim().is_empty() {
-            let parts: Vec<&str> = rel.split(rule.split.as_str()).collect();
-            Some(crate::idgen::eval_template(&rule.template, &parts))
-        } else {
-            None
-        };
-        per_rule.push(json!({ "index": i, "matched": matched, "id": id }));
+        per_rule.push(json!({ "index": i, "matched": matched, "name": name, "auth": auth }));
     }
     Ok(json_ok(json!({
-        "id": result.id,
+        "name": result.name,
+        "auth": result.auth,
         "rule_index": result.rule_index,
         "used_fallback": result.used_fallback,
         "rules": per_rule,

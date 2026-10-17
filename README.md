@@ -5,11 +5,12 @@
 ## 功能
 
 - **多仓库**：每个 repo 独立一个 SQLite 数据库（一个 repo 一个 db）
-- **条目（items）**：扫描仓库文件自动收录；ID 由可配置规则从相对路径生成；支持手动增删改
+- **条目（items）**：扫描仓库文件自动收录；name / auth 由可配置的 info_parse 规则从文件名解析；支持手动增删改
 - **标签（tags）**：树形结构（parent_id），可挂到条目上；删除标签时子标签移到根级
 - **分组（tag_groups）**：`includes`（null = 全部）+ `excludes` 规则筛选条目，实时统计命中数
-- **规则按仓库隔离**：文件后缀与 ID 生成规则每个仓库各一份，保存在该仓库自己的数据库里；config.toml 里的同名项只作为「添加新仓库时」的初始模板
-- **配置**：`repo_paths` / `include_subfixs` / `id_gen_fns` / 服务开关，全部可在页面里改
+- **导出**：主页「导出数据库」下载当前仓库的 SQLite 快照，可直接交给别的程序读
+- **规则按仓库隔离**：文件后缀与 info_parse 规则每个仓库各一份，保存在该仓库自己的数据库里；config.toml 里的同名项只作为「添加新仓库时」的初始模板
+- **配置**：`repo_paths` / `include_subfixs` / `info_parse_fns` / 服务开关，全部可在页面里改
 - **单二进制**：前端用 bun 构建后由 rust-embed 嵌入，`cargo build --release` 产出一个 exe
 - **启停行为**：启动自动打开浏览器；页面关闭（WebSocket 断开）约 3 秒后自动退出
 
@@ -60,7 +61,7 @@ closetag [--port N] [--no-browser] [--data-dir PATH] [-h|--help]
 
 ## 配置参考（config.toml）
 
-`include_subfixs` 与 `id_gen_fns` **每个仓库各存一份**，写在各自数据库的 `meta` 表里，
+`include_subfixs` 与 `info_parse_fns` **每个仓库各存一份**，写在各自数据库的 `meta` 表里，
 在「配置」页的「当前仓库规则」里编辑。下面这两项是**全局默认值**：
 仓库没有自定义规则时使用它们；某个仓库一旦保存过自己的规则，就改为使用自己的那份，
 之后全局怎么改都影响不到它（想回头就点「恢复继承全局默认」）。
@@ -70,10 +71,11 @@ repo_paths = ["D:/weiheng/proj/foo"]
 
 include_subfixs = [".ts", ".tsx", ".rs", ".md"]   # 空 = 所有文件
 
-[[id_gen_fns]]
-match = "docs/.*"        # 可选：命中才生效的正则
-split = "-"              # 切分符，得到 arr
-template = "${arr[0]||arr[1]}"   # 取第一个非空段
+[[info_parse_fns]]
+match = "docs/.*"        # 可选：命中才生效的正则（匹配相对路径）
+split = " - "            # 切分符：把文件名（不含后缀）切成 arr
+name = "${arr[0]}"       # name 模板
+auth = "${arr[1]}"       # auth 模板，留空 = 没有 auth
 
 [server]
 port = 17733             # 0 = 自动；被占用时向后尝试 50 个端口
@@ -81,10 +83,11 @@ open_browser = true
 exit_when_closed = true
 ```
 
-**id_gen 模板语法**：`${arr[N]}`、`||`（第一个非空）、`+`（拼接）、字符串字面量、括号。
-例：`src/utils/date-helper.ts` 按 `-` 切分为 `["src/utils/date", "helper.ts"]`，
-模板 `${arr[0]||arr[1]}` 生成 ID `src/utils/date`。所有规则都不命中或渲染为空时，回退为完整相对路径。
-配置页提供实时预览。
+**info_parse 模板语法**：`${arr[N]}`、`||`（第一个非空）、`+`（拼接）、字符串字面量、括号。
+规则按文件名（去掉后缀）解析：`Naruto - Kishimoto.cbz` 按 ` - ` 切分为 `["Naruto", "Kishimoto"]`，
+默认规则得到 name = `Naruto`、auth = `Kishimoto`；文件名后面多余的附加信息（`Naruto - Kishimoto - vol1.cbz`）会被忽略。
+`name` 渲染为空的规则会被跳过；所有规则都不命中时回退为完整文件名（auth 为空）。
+配置页提供常用预设（name - auth / auth - name / 仅 name / 空白自定义）与实时预览。
 
 ## 数据存储
 
@@ -105,23 +108,25 @@ closetag/
 ```
 
 每个仓库数据库里还有一张 `meta` 表，存放该仓库自己的规则
-（`include_subfixs`、`id_gen_fns`，以及扫描时间 `last_scan_at`）。
+（`include_subfixs`、`info_parse_fns`，以及扫描时间 `last_scan_at`）。
 仓库被移除时数据库文件整体删除，规则随之消失。
 
 ## 数据模型
 
 ```
 tags:      id(int) · name · parent_id → tags(id) [ON DELETE SET NULL] · description
-items:     pk(int) · id(string, 由 id_gen 规则生成) · path(相对 repo, UNIQUE)
-item_tags: item_pk → items(pk) [CASCADE] · tag_id → tags(id) [CASCADE]
+items:     id(int, 自增主键) · name · auth(默认 '') · path(相对 repo, UNIQUE)
+item_tags: item_id → items(id) [CASCADE] · tag_id → tags(id) [CASCADE]
 tag_groups: id(int) · name · includes(JSON tag id 数组, null=全部) · excludes(JSON) · description
-meta:      key · value   # last_scan_at · include_subfixs · id_gen_fns（本仓库的规则）
+meta:      key · value   # last_scan_at · include_subfixs · info_parse_fns（本仓库的规则）
 ```
 
-- **items.id 不唯一**：同一 ID 的多个文件在页面上可按 ID 分组展示（这就是 id_gen 的意义）
-- **扫描语义**：新文件插入；ID 变化则更新；磁盘上消失的文件连同标签关联一起删除
+- **items.id 是自增整数**，与 tags 一致；`name` / `auth` 只是从文件名解析出来的普通字段
+- **(name, auth) 不设唯一索引**：不同目录下的同名文件（同一作品的不同变体）可以共存，去重交给使用方
+- **扫描语义**：新文件插入；(name, auth) 变化则更新；磁盘上消失的文件连同标签关联一起删除
 - **分组语义**：命中 includes 任一标签（includes 为 null 表示全部）且不命中 excludes 任一标签
-- **规则归属**：后缀与 ID 规则存在各 repo 的 `meta` 表，随该 repo 的数据库一起增删；删除 `meta` 中对应键即恢复继承 config.toml 的全局默认
+- **规则归属**：后缀与 info_parse 规则存在各 repo 的 `meta` 表，随该 repo 的数据库一起增删；删除 `meta` 中对应键即恢复继承 config.toml 的全局默认
+- **旧库迁移**：老版本 items 表的 `pk` 会成为新的自增 `id`（标签关联不变），旧的字符串 id 复制进 `name`，下次扫描按新规则刷新；旧的 `id_gen_fns` 规则会转换成 info_parse 规则（原 template 变成 name 模板，auth 为空）
 
 ## API 一览
 
@@ -130,18 +135,19 @@ meta:      key · value   # last_scan_at · include_subfixs · id_gen_fns（本�
 | GET/POST | `/api/repos` | 仓库列表 / 添加（POST body: `{path}`） |
 | DELETE | `/api/repos/{id}` | 移除仓库并删除其数据库 |
 | POST | `/api/repos/{id}/scan` | 重新扫描仓库 |
-| GET/PUT/DELETE | `/api/repos/{id}/settings` | 该仓库自己的后缀 / ID 规则（PUT body: `{include_subfixs, id_gen_fns}`；DELETE = 恢复继承全局默认） |
+| GET | `/api/repos/{id}/export` | 下载该仓库数据库的快照（`VACUUM INTO`，含仍留在 `-wal` 里的写入） |
+| GET/PUT/DELETE | `/api/repos/{id}/settings` | 该仓库自己的后缀 / info_parse 规则（PUT body: `{include_subfixs, info_parse_fns}`；DELETE = 恢复继承全局默认） |
 | GET/POST | `/api/repos/{id}/tags` | 标签列表 / 新建 |
 | PUT/DELETE | `/api/repos/{id}/tags/{tag_id}` | 更新 / 删除（子标签移到根级） |
 | GET/POST | `/api/repos/{id}/items` | 条目列表（`?tag=&group=&q=&limit=&offset=`）/ 新建 |
-| PUT/DELETE | `/api/repos/{id}/items/{pk}` | 更新 / 删除 |
-| POST/DELETE | `/api/repos/{id}/items/{pk}/tags[/{tag_id}]` | 批量加标签 / 移除单个标签 |
+| PUT/DELETE | `/api/repos/{id}/items/{item_id}` | 更新 / 删除 |
+| POST/DELETE | `/api/repos/{id}/items/{item_id}/tags[/{tag_id}]` | 批量加标签 / 移除单个标签 |
 | GET/POST | `/api/repos/{id}/groups` | 分组列表 / 新建 |
 | PUT/DELETE | `/api/repos/{id}/groups/{group_id}` | 更新 / 删除 |
 | GET | `/api/repos/{id}/groups/{group_id}/items` | 分组命中条目 |
 | GET/PUT | `/api/config` | 读取 / 保存全局配置（含新仓库的默认规则模板） |
 | GET | `/api/about` | 版本、数据目录、端口 |
-| POST | `/api/idgen/preview` | ID 生成预览（body: `{path, rules?, repo?}`） |
+| POST | `/api/infoparse/preview` | name/auth 解析预览（body: `{path, rules?, repo?}`） |
 | GET | `/ws` | WebSocket：页面保活；断开即触发退出倒计时 |
 
 ## 开发模式
@@ -155,7 +161,7 @@ cargo run
 cd frontend && bun run dev
 ```
 
-后端单元测试（idgen 模板求值）在 `src/idgen.rs` 中，需要时手动执行 `cargo test`。
+后端单元测试（infoparse 模板求值与扫描逻辑）在 `src/infoparse.rs` 与 `src/scanner.rs` 中，需要时手动执行 `cargo test`。
 
 ## 已知限制 / 设计取舍
 

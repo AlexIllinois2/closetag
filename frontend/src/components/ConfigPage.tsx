@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { useApp } from '../context'
-import type { About, Config, IdGenFn, IdGenPreview, RepoSettingsDraft } from '../types'
+import type { About, Config, InfoParseFn, InfoParsePreview, RepoSettingsDraft } from '../types'
 
 /** Lowercase and ensure a leading dot so the stored form is comparable. */
 function normSuffix(s: string): string {
@@ -9,6 +9,14 @@ function normSuffix(s: string): string {
   if (!t) return ''
   return t.startsWith('.') ? t : `.${t}`
 }
+
+/** 常用文件名预设：name - auth / auth - name / 仅 name / 空白自定义兜底 */
+const PARSE_PRESETS: { label: string; rule: Omit<InfoParseFn, 'match'> }[] = [
+  { label: 'name - auth', rule: { split: ' - ', name: '${arr[0]}', auth: '${arr[1]}' } },
+  { label: 'auth - name', rule: { split: ' - ', name: '${arr[1]}', auth: '${arr[0]}' } },
+  { label: '仅 name', rule: { split: ' - ', name: '${arr[0]}', auth: '' } },
+  { label: '空白（自定义）', rule: { split: ' - ', name: '', auth: '' } },
+]
 
 function SuffixEditor({
   suffixes,
@@ -67,22 +75,23 @@ function SuffixEditor({
   )
 }
 
-function IdRulesEditor({
+function InfoParseRulesEditor({
   rules,
   onChange,
 }: {
-  rules: IdGenFn[]
-  onChange: (next: IdGenFn[]) => void
+  rules: InfoParseFn[]
+  onChange: (next: InfoParseFn[]) => void
 }) {
-  const update = (i: number, patch: Partial<IdGenFn>) =>
+  const update = (i: number, patch: Partial<InfoParseFn>) =>
     onChange(rules.map((r, j) => (j === i ? { ...r, ...patch } : r)))
 
   return (
     <>
       <p className="muted small">
-        规则按顺序生效：<code>match</code> 正则命中相对路径后，用 <code>split</code> 把路径切分成{' '}
-        <code>arr</code>，再渲染 <code>template</code>。模板可用 <code>{'${arr[0]||arr[1]}'}</code>
-        （取第一个非空）、字符串拼接与括号；渲染为空则回退为完整相对路径。
+        规则按顺序生效：<code>match</code> 正则命中相对路径后，用 <code>split</code>{' '}
+        把<strong>文件名（不含后缀）</strong>切分成 <code>arr</code>，再分别渲染 <code>name</code>{' '}
+        和 <code>auth</code> 模板。文件名后面多余的附加信息会被忽略；<code>name</code>{' '}
+        渲染为空的规则会被跳过，全部落空时回退为完整文件名（auth 为空）。
       </p>
       {rules.map((rule, i) => (
         <div key={i} className="rule-row">
@@ -100,9 +109,15 @@ function IdRulesEditor({
           />
           <input
             className="input"
-            placeholder="${arr[0]||arr[1]}"
-            value={rule.template}
-            onChange={(e) => update(i, { template: e.target.value })}
+            placeholder="name 模板，如 ${arr[0]}"
+            value={rule.name}
+            onChange={(e) => update(i, { name: e.target.value })}
+          />
+          <input
+            className="input"
+            placeholder="auth 模板，如 ${arr[1]}（可空）"
+            value={rule.auth}
+            onChange={(e) => update(i, { auth: e.target.value })}
           />
           <button
             className="btn small danger"
@@ -113,12 +128,18 @@ function IdRulesEditor({
           </button>
         </div>
       ))}
-      <button
-        className="btn"
-        onClick={() => onChange([...rules, { split: '-', template: '${arr[0]||arr[1]}' }])}
-      >
-        ＋ 添加规则
-      </button>
+      <div className="row wrap">
+        {PARSE_PRESETS.map((p) => (
+          <button
+            key={p.label}
+            className="btn small"
+            title={`插入预设：${p.label}`}
+            onClick={() => onChange([...rules, { ...p.rule }])}
+          >
+            ＋ {p.label}
+          </button>
+        ))}
+      </div>
     </>
   )
 }
@@ -134,6 +155,7 @@ export default function ConfigPage() {
     repoSettings,
     refreshRepoSettings,
     toast,
+    ask,
   } = useApp()
   const [globalDraft, setGlobalDraft] = useState<Config | null>(null)
   const [repoDraft, setRepoDraft] = useState<RepoSettingsDraft | null>(null)
@@ -142,8 +164,8 @@ export default function ConfigPage() {
   const [addingRepo, setAddingRepo] = useState(false)
   const [savingGlobal, setSavingGlobal] = useState(false)
   const [savingRepo, setSavingRepo] = useState(false)
-  const [previewPath, setPreviewPath] = useState('src/utils/date-helper.ts')
-  const [preview, setPreview] = useState<IdGenPreview | null>(null)
+  const [previewPath, setPreviewPath] = useState('manga/Naruto - Kishimoto.cbz')
+  const [preview, setPreview] = useState<InfoParsePreview | null>(null)
 
   useEffect(() => {
     if (config) setGlobalDraft(JSON.parse(JSON.stringify(config)) as Config)
@@ -154,7 +176,7 @@ export default function ConfigPage() {
     if (repoSettings) {
       setRepoDraft({
         include_subfixs: [...repoSettings.include_subfixs],
-        id_gen_fns: [...repoSettings.id_gen_fns],
+        info_parse_fns: [...repoSettings.info_parse_fns],
       })
     } else {
       setRepoDraft(null)
@@ -168,7 +190,7 @@ export default function ConfigPage() {
       .catch(() => {})
   }, [])
 
-  // debounce the id-gen preview against the repo rules being edited
+  // debounce the info-parse preview against the repo rules being edited
   useEffect(() => {
     if (!repoDraft || !previewPath.trim()) {
       setPreview(null)
@@ -176,7 +198,7 @@ export default function ConfigPage() {
     }
     const timer = setTimeout(() => {
       api
-        .idgenPreview(previewPath.trim(), repoDraft.id_gen_fns)
+        .infoparsePreview(previewPath.trim(), repoDraft.info_parse_fns)
         .then(setPreview)
         .catch(() => setPreview(null))
     }, 300)
@@ -204,7 +226,7 @@ export default function ConfigPage() {
       const saved = await api.saveRepoSettings(currentRepoId, repoDraft)
       setRepoDraft({
         include_subfixs: [...saved.include_subfixs],
-        id_gen_fns: [...saved.id_gen_fns],
+        info_parse_fns: [...saved.info_parse_fns],
       })
       toast('ok', '仓库规则已保存')
       await refreshRepoSettings()
@@ -218,13 +240,13 @@ export default function ConfigPage() {
 
   const resetRepoSettings = async () => {
     if (!currentRepoId) return
-    if (!confirm('放弃该仓库的自定义规则，改为继承全局默认？')) return
+    if (!(await ask('放弃该仓库的自定义规则，改为继承全局默认？', '继承全局'))) return
     setSavingRepo(true)
     try {
       const saved = await api.resetRepoSettings(currentRepoId)
       setRepoDraft({
         include_subfixs: [...saved.include_subfixs],
-        id_gen_fns: [...saved.id_gen_fns],
+        info_parse_fns: [...saved.info_parse_fns],
       })
       toast('ok', '已恢复继承全局默认')
       await refreshRepoSettings()
@@ -240,7 +262,7 @@ export default function ConfigPage() {
     if (!globalDraft) return
     setRepoDraft({
       include_subfixs: [...globalDraft.include_subfixs],
-      id_gen_fns: [...globalDraft.id_gen_fns],
+      info_parse_fns: [...globalDraft.info_parse_fns],
     })
     toast('ok', '已套用全局默认，记得保存')
   }
@@ -264,11 +286,17 @@ export default function ConfigPage() {
 
   const removeRepo = async (path: string) => {
     const info = repos.find((r) => r.path === path)
-    if (!info) return
+    if (!info) {
+      // The list and the config can be a moment apart; say so instead of doing nothing.
+      toast('err', `「${path}」的仓库信息还没加载到，正在刷新，稍后再点移除`)
+      await refreshRepos()
+      return
+    }
     if (
-      !confirm(
+      !(await ask(
         `移除仓库「${info.path}」？\n该仓库的数据库（${info.item_count} 条目 / ${info.tag_count} 标签）会被删除，此操作不可恢复。`,
-      )
+        '移除',
+      ))
     )
       return
     try {
@@ -367,7 +395,7 @@ export default function ConfigPage() {
               <code>{currentRepo.path}</code>
             </div>
             <p className="muted small">
-              后缀与 ID 规则每个仓库各存一份（保存在该仓库自己的数据库里）。扫描与「新建/编辑条目」都只使用这里的规则。
+              后缀与 info_parse 规则每个仓库各存一份（保存在该仓库自己的数据库里）。扫描与「新建/编辑条目」都只使用这里的规则。
               {repoSettings?.using_global
                 ? ' 该仓库尚未自定义，当前正继承下方的全局默认。'
                 : ' 该仓库已自定义，修改全局默认不会影响它。'}
@@ -381,10 +409,10 @@ export default function ConfigPage() {
               }
             />
 
-            <h4>ID 生成规则</h4>
-            <IdRulesEditor
-              rules={repoDraft?.id_gen_fns ?? []}
-              onChange={(next) => setRepoDraft((d) => (d ? { ...d, id_gen_fns: next } : d))}
+            <h4>info_parse 解析规则</h4>
+            <InfoParseRulesEditor
+              rules={repoDraft?.info_parse_fns ?? []}
+              onChange={(next) => setRepoDraft((d) => (d ? { ...d, info_parse_fns: next } : d))}
             />
 
             <div className="preview-box">
@@ -394,15 +422,16 @@ export default function ConfigPage() {
                   className="input"
                   value={previewPath}
                   onChange={(e) => setPreviewPath(e.target.value)}
-                  placeholder="src/utils/date-helper.ts"
+                  placeholder="manga/Naruto - Kishimoto.cbz"
                 />
               </label>
               {preview && (
                 <div className="preview-result">
                   <div>
-                    生成 ID：<code>{preview.id}</code>{' '}
+                    解析结果：name = <code>{preview.name || '（空）'}</code>，auth ={' '}
+                    <code>{preview.auth || '（空）'}</code>{' '}
                     {preview.used_fallback ? (
-                      <span className="muted small">（无规则命中，回退为完整路径）</span>
+                      <span className="muted small">（无规则命中，回退为完整文件名）</span>
                     ) : (
                       <span className="muted small">（命中规则 #{preview.rule_index! + 1}）</span>
                     )}
@@ -411,7 +440,17 @@ export default function ConfigPage() {
                     {preview.rules.map((r) => (
                       <div key={r.index}>
                         规则 {r.index + 1}：
-                        {r.matched ? (r.id ? <code>{r.id}</code> : '模板为空') : '未命中'}
+                        {r.matched ? (
+                          r.name ? (
+                            <>
+                              name = <code>{r.name}</code>，auth = <code>{r.auth || '（空）'}</code>
+                            </>
+                          ) : (
+                            'name 模板为空'
+                          )
+                        ) : (
+                          '未命中'
+                        )}
                       </div>
                     ))}
                   </div>
@@ -453,10 +492,10 @@ export default function ConfigPage() {
           }
         />
 
-        <h4>ID 生成规则</h4>
-        <IdRulesEditor
-          rules={globalDraft.id_gen_fns}
-          onChange={(next) => setGlobalDraft({ ...globalDraft, id_gen_fns: next })}
+        <h4>info_parse 解析规则</h4>
+        <InfoParseRulesEditor
+          rules={globalDraft.info_parse_fns}
+          onChange={(next) => setGlobalDraft({ ...globalDraft, info_parse_fns: next })}
         />
 
         <div className="row">

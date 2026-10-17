@@ -343,12 +343,22 @@ a {
 }
 
 .col-path {
-  width: 46%;
+  width: 30%;
   min-width: 220px;
 }
 
 .col-id {
-  width: 200px;
+  width: 64px;
+}
+
+.col-name {
+  width: 18%;
+  min-width: 110px;
+}
+
+.col-auth {
+  width: 15%;
+  min-width: 90px;
 }
 
 .col-actions {
@@ -567,15 +577,19 @@ a {
 }
 
 .rule-row .input:first-child {
-  flex: 1 1 30%;
+  flex: 1 1 24%;
 }
 
 .rule-row .input:nth-child(2) {
-  flex: 0 0 80px;
+  flex: 0 0 70px;
 }
 
 .rule-row .input:nth-child(3) {
-  flex: 1 1 40%;
+  flex: 1 1 28%;
+}
+
+.rule-row .input:nth-child(4) {
+  flex: 1 1 28%;
 }
 
 .preview-box {

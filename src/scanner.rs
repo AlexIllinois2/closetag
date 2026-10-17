@@ -1,6 +1,6 @@
-use crate::config::{normalize_suffix, IdGenFn};
+use crate::config::{normalize_suffix, InfoParseFn};
 use crate::db;
-use crate::idgen;
+use crate::infoparse;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -39,13 +39,13 @@ pub struct ScanReport {
 }
 
 /// Sync the `items` table with the files on disk:
-/// - new files are inserted (id derived via id_gen rules)
-/// - items whose generated id changed are updated
+/// - new files are inserted (name/auth parsed via info-parse rules)
+/// - items whose parsed (name, auth) changed are updated
 /// - items whose file disappeared are deleted (tag links cascade away)
 pub fn scan_repo(
     root: &Path,
     include_subfixs: &[String],
-    rules: &[IdGenFn],
+    rules: &[InfoParseFn],
     conn: &Connection,
 ) -> Result<ScanReport> {
     let started = Instant::now();
@@ -55,11 +55,11 @@ pub fn scan_repo(
         .filter(|s| !s.is_empty())
         .collect();
 
-    // existing items: path -> (pk, id)
-    let mut existing: HashMap<String, (i64, String)> = HashMap::new();
+    // existing items: path -> (id, name, auth)
+    let mut existing: HashMap<String, (i64, String, String)> = HashMap::new();
     {
         let mut stmt = conn
-            .prepare("SELECT pk, id, path FROM items")
+            .prepare("SELECT id, name, auth, path FROM items")
             .context("prepare items read")?;
         let rows = stmt
             .query_map([], |r| {
@@ -67,16 +67,17 @@ pub fn scan_repo(
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })
             .context("query items")?;
         for row in rows {
-            let (pk, id, path) = row?;
-            existing.insert(path, (pk, id));
+            let (id, name, auth, path) = row?;
+            existing.insert(path, (id, name, auth));
         }
     }
 
-    let mut seen: HashMap<String, String> = HashMap::new(); // path -> id
+    let mut seen: HashMap<String, (String, String)> = HashMap::new(); // path -> (name, auth)
     let mut added = 0usize;
     let mut updated = 0usize;
 
@@ -124,34 +125,35 @@ pub fn scan_repo(
                 continue;
             }
         }
-        let id = idgen::generate_id(&rel_str, rules).id;
+        let info = infoparse::parse_info(&rel_str, rules);
         match existing.get(&rel_str) {
-            Some((pk, old_id)) => {
-                if old_id != &id {
+            Some((id, old_name, old_auth)) => {
+                if old_name != &info.name || old_auth != &info.auth {
                     tx.execute(
-                        "UPDATE items SET id = ?1, updated_at = ?2 WHERE pk = ?3",
-                        rusqlite::params![id, db::now_iso(), pk],
+                        "UPDATE items SET name = ?1, auth = ?2, updated_at = ?3 WHERE id = ?4",
+                        rusqlite::params![info.name, info.auth, db::now_iso(), id],
                     )
-                    .context("update item id")?;
+                    .context("update item name/auth")?;
                     updated += 1;
                 }
             }
             None => {
                 tx.execute(
-                    "INSERT INTO items(id, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-                    rusqlite::params![id, rel_str, db::now_iso()],
+                    "INSERT INTO items(name, auth, path, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    rusqlite::params![info.name, info.auth, rel_str, db::now_iso()],
                 )
                 .context("insert item")?;
                 added += 1;
             }
         }
-        seen.insert(rel_str, id);
+        seen.insert(rel_str, (info.name, info.auth));
     }
 
     let mut removed = 0usize;
-    for (path, (pk, _)) in existing.iter() {
+    for (path, (id, _, _)) in existing.iter() {
         if !seen.contains_key(path) {
-            tx.execute("DELETE FROM items WHERE pk = ?1", [pk])
+            tx.execute("DELETE FROM items WHERE id = ?1", [id])
                 .context("delete missing item")?;
             removed += 1;
         }
@@ -170,15 +172,16 @@ pub fn scan_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::IdGenFn;
+    use crate::config::InfoParseFn;
     use rusqlite::Connection;
     use std::fs;
 
-    fn rule(split: &str, template: &str) -> IdGenFn {
-        IdGenFn {
+    fn rule(split: &str, name: &str, auth: &str) -> InfoParseFn {
+        InfoParseFn {
             match_re: None,
             split: split.to_string(),
-            template: template.to_string(),
+            name: name.to_string(),
+            auth: auth.to_string(),
         }
     }
 
@@ -210,17 +213,22 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         let suffixes = vec![".ts".to_string(), ".md".to_string()];
-        let rules = vec![rule("-", "${arr[0]||arr[1]}")];
+        let rules = vec![rule(" - ", "${arr[0]}", "${arr[1]}")];
 
         let report = scan_repo(&root, &suffixes, &rules, &conn).unwrap();
         assert_eq!(report.scanned, 3, "只有 3 个文件应被收录");
         assert_eq!(report.added, 3);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM items"), 3);
 
-        let id: String = conn
-            .query_row("SELECT id FROM items WHERE path = 'src/date-helper.ts'", [], |r| r.get(0))
+        let (name, auth): (String, String) = conn
+            .query_row(
+                "SELECT name, auth FROM items WHERE path = 'src/date-helper.ts'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(id, "src/date", "ID 应由 id_gen 规则生成");
+        assert_eq!(name, "date-helper", "name 应由 info_parse 规则从文件名解析");
+        assert_eq!(auth, "", "文件名无第二段时 auth 为空");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -234,7 +242,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         let suffixes = vec![".ts".to_string()];
-        let rules = vec![rule("-", "${arr[0]||arr[1]}")];
+        let rules = vec![rule(" - ", "${arr[0]}", "${arr[1]}")];
 
         let first = scan_repo(&root, &suffixes, &rules, &conn).unwrap();
         assert_eq!(first.added, 2);
@@ -251,21 +259,35 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_updates_id_when_rule_changes() {
+    fn test_scan_updates_name_when_rule_changes() {
         let root = tmpdir("reid");
-        fs::write(root.join("a-b.ts"), "x").unwrap();
+        fs::write(root.join("a - b.ts"), "x").unwrap();
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         let suffixes = vec![".ts".to_string()];
 
-        scan_repo(&root, &suffixes, &[rule("-", "${arr[0]}")], &conn).unwrap();
-        let id1: String = conn.query_row("SELECT id FROM items WHERE path = 'a-b.ts'", [], |r| r.get(0)).unwrap();
-        assert_eq!(id1, "a");
+        scan_repo(&root, &suffixes, &[rule(" - ", "${arr[0]}", "${arr[1]}")], &conn).unwrap();
+        let (name1, auth1): (String, String) = conn
+            .query_row(
+                "SELECT name, auth FROM items WHERE path = 'a - b.ts'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name1, "a");
+        assert_eq!(auth1, "b");
 
-        let report = scan_repo(&root, &suffixes, &[rule("-", "${arr[1]}")], &conn).unwrap();
-        assert_eq!(report.updated, 1, "ID 变化应计入 updated");
-        let id2: String = conn.query_row("SELECT id FROM items WHERE path = 'a-b.ts'", [], |r| r.get(0)).unwrap();
-        assert_eq!(id2, "b.ts");
+        let report = scan_repo(&root, &suffixes, &[rule(" - ", "${arr[1]}", "${arr[0]}")], &conn).unwrap();
+        assert_eq!(report.updated, 1, "name/auth 变化应计入 updated");
+        let (name2, auth2): (String, String) = conn
+            .query_row(
+                "SELECT name, auth FROM items WHERE path = 'a - b.ts'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name2, "b");
+        assert_eq!(auth2, "a");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -276,18 +298,18 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
 
-        scan_repo(&root, &[".ts".to_string()], &[rule("-", "${arr[0]}")], &conn).unwrap();
+        scan_repo(&root, &[".ts".to_string()], &[rule(" - ", "${arr[0]}", "")], &conn).unwrap();
         conn.execute("INSERT INTO tags(name, parent_id, description, created_at, updated_at) VALUES ('t', NULL, '', 'x', 'x')", [])
             .unwrap();
         conn.execute(
-            "INSERT INTO item_tags(item_pk, tag_id) VALUES ((SELECT pk FROM items WHERE path = 'gone.ts'), 1)",
+            "INSERT INTO item_tags(item_id, tag_id) VALUES ((SELECT id FROM items WHERE path = 'gone.ts'), 1)",
             [],
         )
         .unwrap();
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM item_tags"), 1);
 
         fs::remove_file(root.join("gone.ts")).unwrap();
-        scan_repo(&root, &[".ts".to_string()], &[rule("-", "${arr[0]}")], &conn).unwrap();
+        scan_repo(&root, &[".ts".to_string()], &[rule(" - ", "${arr[0]}", "")], &conn).unwrap();
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM items"), 0);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM item_tags"), 0, "标签关联应级联删除");
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM tags"), 1, "标签本身要保留");
@@ -301,8 +323,26 @@ mod tests {
         fs::write(root.join("b.bin"), "y").unwrap();
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        let report = scan_repo(&root, &[], &[rule("-", "${arr[0]}")], &conn).unwrap();
+        let report = scan_repo(&root, &[], &[rule(" - ", "${arr[0]}", "")], &conn).unwrap();
         assert_eq!(report.scanned, 2, "后缀列表为空时收录所有文件");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_duplicate_name_auth_is_allowed() {
+        // (name, auth) 不设唯一索引：不同目录下的同名文件（同一作品的变体）可以共存
+        let root = tmpdir("dupe");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        fs::write(root.join("a/Naruto - Kishimoto.cbz"), "x").unwrap();
+        fs::write(root.join("b/Naruto - Kishimoto.cbz"), "y").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let rules = vec![rule(" - ", "${arr[0]}", "${arr[1]}")];
+
+        let report = scan_repo(&root, &[".cbz".to_string()], &rules, &conn).unwrap();
+        assert_eq!(report.added, 2, "重复的 (name, auth) 不应被唯一索引挡住");
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM items"), 2);
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -7,7 +7,7 @@ import Modal from './Modal'
 import { sortTagsTree, tagDepth } from './TagPicker'
 
 export default function TagsPage() {
-  const { currentRepoId, currentRepo, toast, refreshRepos } = useApp()
+  const { currentRepoId, currentRepo, toast, refreshRepos, ask } = useApp()
   const [tags, setTags] = useState<Tag[]>([])
   const [editing, setEditing] = useState<{ tag: Tag | null; parentId: number | null } | null>(null)
 
@@ -26,7 +26,7 @@ export default function TagsPage() {
 
   const remove = async (t: Tag) => {
     if (!currentRepoId) return
-    if (!confirm(`删除标签「${t.name}」？\n子标签会移到根级，条目上该标签的关联会被移除。`)) return
+    if (!(await ask(`删除标签「${t.name}」？\n子标签会移到根级，条目上该标签的关联会被移除。`))) return
     try {
       await api.deleteTag(currentRepoId, t.id)
       toast('ok', '已删除')

@@ -1,7 +1,7 @@
 use super::{ApiError, json_ok};
-use crate::config::IdGenFn;
+use crate::config::InfoParseFn;
 use crate::db;
-use crate::idgen;
+use crate::infoparse;
 use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -16,8 +16,9 @@ pub struct TagBrief {
 
 #[derive(Serialize)]
 pub struct ItemOut {
-    pub pk: i64,
-    pub id: String,
+    pub id: i64,
+    pub name: String,
+    pub auth: String,
     pub path: String,
     pub tags: Vec<TagBrief>,
     pub created_at: String,
@@ -65,7 +66,7 @@ fn build_filter(
 
     if let Some(t) = tag {
         wheres.push(
-            "EXISTS (SELECT 1 FROM item_tags it WHERE it.item_pk = items.pk AND it.tag_id = ?)"
+            "EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = items.id AND it.tag_id = ?)"
                 .to_string(),
         );
         params.push(P::I(t));
@@ -76,7 +77,7 @@ fn build_filter(
         if let Some(inc) = includes {
             let json = serde_json::to_string(&inc).unwrap_or_else(|_| "[]".to_string());
             wheres.push(
-                "EXISTS (SELECT 1 FROM item_tags it WHERE it.item_pk = items.pk \
+                "EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = items.id \
                  AND it.tag_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)))"
                     .to_string(),
             );
@@ -85,7 +86,7 @@ fn build_filter(
         if !excludes.is_empty() {
             let json = serde_json::to_string(&excludes).unwrap_or_else(|_| "[]".to_string());
             wheres.push(
-                "items.pk NOT IN (SELECT item_pk FROM item_tags \
+                "items.id NOT IN (SELECT item_id FROM item_tags \
                  WHERE tag_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)))"
                     .to_string(),
             );
@@ -95,7 +96,12 @@ fn build_filter(
 
     if let Some(q) = q {
         let like = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
-        wheres.push("(items.path LIKE ? ESCAPE '\\' OR items.id LIKE ? ESCAPE '\\')".to_string());
+        wheres.push(
+            "(items.path LIKE ? ESCAPE '\\' OR items.name LIKE ? ESCAPE '\\' \
+             OR items.auth LIKE ? ESCAPE '\\')"
+                .to_string(),
+        );
+        params.push(P::S(like.clone()));
         params.push(P::S(like.clone()));
         params.push(P::S(like));
     }
@@ -110,19 +116,19 @@ fn build_filter(
 
 pub fn load_tags_for(
     conn: &Connection,
-    pks: &[i64],
+    item_ids: &[i64],
 ) -> rusqlite::Result<HashMap<i64, Vec<TagBrief>>> {
     let mut map: HashMap<i64, Vec<TagBrief>> = HashMap::new();
-    if pks.is_empty() {
+    if item_ids.is_empty() {
         return Ok(map);
     }
-    let placeholders = pks.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = item_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT it.item_pk, t.id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id \
-         WHERE it.item_pk IN ({placeholders}) ORDER BY t.name"
+        "SELECT it.item_id, t.id, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id \
+         WHERE it.item_id IN ({placeholders}) ORDER BY t.name"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(pks.iter()), |r| {
+    let rows = stmt.query_map(params_from_iter(item_ids.iter()), |r| {
         Ok((
             r.get::<_, i64>(0)?,
             TagBrief {
@@ -132,8 +138,8 @@ pub fn load_tags_for(
         ))
     })?;
     for row in rows {
-        let (pk, t) = row?;
-        map.entry(pk).or_default().push(t);
+        let (item_id, t) = row?;
+        map.entry(item_id).or_default().push(t);
     }
     Ok(map)
 }
@@ -151,8 +157,8 @@ pub fn query_items(
     params.push(P::I(limit));
     params.push(P::I(offset));
     let sql = format!(
-        "SELECT pk, id, path, created_at, updated_at FROM items {} \
-         ORDER BY id, path LIMIT ? OFFSET ?",
+        "SELECT id, name, auth, path, created_at, updated_at FROM items {} \
+         ORDER BY name, auth, path LIMIT ? OFFSET ?",
         filter.where_sql
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -163,23 +169,25 @@ pub fn query_items(
             r.get::<_, String>(2)?,
             r.get::<_, String>(3)?,
             r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
         ))
     })?;
     let mut raw = Vec::new();
-    let mut pks = Vec::new();
+    let mut item_ids = Vec::new();
     for row in rows {
-        let (pk, id, path, c, u) = row?;
-        raw.push((pk, id, path, c, u));
-        pks.push(pk);
+        let (id, name, auth, path, c, u) = row?;
+        raw.push((id, name, auth, path, c, u));
+        item_ids.push(id);
     }
-    let tags_map = load_tags_for(conn, &pks)?;
+    let tags_map = load_tags_for(conn, &item_ids)?;
     Ok(raw
         .into_iter()
-        .map(|(pk, id, path, c, u)| ItemOut {
-            pk,
+        .map(|(id, name, auth, path, c, u)| ItemOut {
             id,
+            name,
+            auth,
             path,
-            tags: tags_map.get(&pk).cloned().unwrap_or_default(),
+            tags: tags_map.get(&id).cloned().unwrap_or_default(),
             created_at: c,
             updated_at: u,
         })
@@ -197,32 +205,34 @@ pub fn count_items(
     Ok(conn.query_row(&sql, params_from_iter(filter.params.iter()), |r| r.get(0))?)
 }
 
-pub fn load_item(conn: &Connection, pk: i64) -> rusqlite::Result<ItemOut> {
-    let (id, path, c, u) = conn.query_row(
-        "SELECT id, path, created_at, updated_at FROM items WHERE pk = ?1",
-        [pk],
+pub fn load_item(conn: &Connection, item_id: i64) -> rusqlite::Result<ItemOut> {
+    let (name, auth, path, c, u) = conn.query_row(
+        "SELECT name, auth, path, created_at, updated_at FROM items WHERE id = ?1",
+        [item_id],
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         },
     )?;
-    let tags_map = load_tags_for(conn, &[pk])?;
+    let tags_map = load_tags_for(conn, &[item_id])?;
     Ok(ItemOut {
-        pk,
-        id,
+        id: item_id,
+        name,
+        auth,
         path,
-        tags: tags_map.get(&pk).cloned().unwrap_or_default(),
+        tags: tags_map.get(&item_id).cloned().unwrap_or_default(),
         created_at: c,
         updated_at: u,
     })
 }
 
 /// Replace the full tag set of an item inside a transaction.
-pub fn set_item_tags(conn: &mut Connection, pk: i64, tag_ids: &[i64]) -> anyhow::Result<()> {
+pub fn set_item_tags(conn: &mut Connection, item_id: i64, tag_ids: &[i64]) -> anyhow::Result<()> {
     {
         let tx = conn.transaction()?;
         for t in tag_ids {
@@ -233,11 +243,11 @@ pub fn set_item_tags(conn: &mut Connection, pk: i64, tag_ids: &[i64]) -> anyhow:
                 anyhow::bail!("tag not found: {t}");
             }
         }
-        tx.execute("DELETE FROM item_tags WHERE item_pk = ?1", [pk])?;
+        tx.execute("DELETE FROM item_tags WHERE item_id = ?1", [item_id])?;
         for t in tag_ids {
             tx.execute(
-                "INSERT OR IGNORE INTO item_tags(item_pk, tag_id) VALUES (?1, ?2)",
-                params![pk, t],
+                "INSERT OR IGNORE INTO item_tags(item_id, tag_id) VALUES (?1, ?2)",
+                params![item_id, t],
             )?;
         }
         tx.commit()?;
@@ -287,12 +297,12 @@ pub struct CreateItem {
     pub tags: Vec<i64>,
 }
 
-/// Id rules for one repo: the repo's own settings, or the global defaults
-/// when it has none of its own.
-fn id_rules(state: &AppState, conn: &Connection) -> anyhow::Result<Vec<IdGenFn>> {
+/// Info-parse rules for one repo: the repo's own settings, or the global
+/// defaults when it has none of its own.
+fn info_rules(state: &AppState, conn: &Connection) -> anyhow::Result<Vec<InfoParseFn>> {
     let global = state.config.lock().unwrap().repo_defaults();
     let (settings, _using_global) = crate::repo_settings::load(conn, &global)?;
-    Ok(settings.id_gen_fns)
+    Ok(settings.info_parse_fns)
 }
 
 pub async fn create(
@@ -304,23 +314,23 @@ pub async fn create(
     let pool = state.pool_for(&path.into_inner())?;
     let mut conn = pool.get()?;
     let existing: Option<i64> = conn
-        .query_row("SELECT pk FROM items WHERE path = ?1", [&rel], |r| r.get(0))
+        .query_row("SELECT id FROM items WHERE path = ?1", [&rel], |r| r.get(0))
         .optional()?;
     if existing.is_some() {
         return Err(ApiError::conflict(format!("item already exists: {rel}")));
     }
-    let rules = id_rules(&state, &conn)?;
-    let id = idgen::generate_id(&rel, &rules).id;
+    let rules = info_rules(&state, &conn)?;
+    let info = infoparse::parse_info(&rel, &rules);
     let now = db::now_iso();
     conn.execute(
-        "INSERT INTO items(id, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-        params![id, rel, now],
+        "INSERT INTO items(name, auth, path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![info.name, info.auth, rel, now],
     )?;
-    let pk = conn.last_insert_rowid();
+    let item_id = conn.last_insert_rowid();
     if !body.tags.is_empty() {
-        set_item_tags(&mut conn, pk, &body.tags)?;
+        set_item_tags(&mut conn, item_id, &body.tags)?;
     }
-    let item = load_item(&conn, pk)?;
+    let item = load_item(&conn, item_id)?;
     Ok(json_ok(item))
 }
 
@@ -335,17 +345,17 @@ pub async fn update(
     path: web::Path<(String, i64)>,
     body: web::Json<UpdateItem>,
 ) -> Result<HttpResponse, ApiError> {
-    let (repo, pk) = path.into_inner();
+    let (repo, item_id) = path.into_inner();
     let pool = state.pool_for(&repo)?;
     let mut conn = pool.get()?;
-    let current: Option<(String, String)> = conn
+    let current: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT id, path FROM items WHERE pk = ?1",
-            [pk],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            "SELECT name, auth, path FROM items WHERE id = ?1",
+            [item_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let (cur_id, cur_path) = match current {
+    let (cur_name, cur_auth, cur_path) = match current {
         Some(v) => v,
         None => return Err(ApiError::not_found("item not found")),
     };
@@ -353,17 +363,18 @@ pub async fn update(
         Some(p) => normalize_rel_path(p)?,
         None => cur_path.clone(),
     };
-    let new_id = if body.path.is_some() {
-        let rules = id_rules(&state, &conn)?;
-        idgen::generate_id(&new_path, &rules).id
+    // name/auth 由 info_parse 规则从文件名解析；只有路径变化时才重算
+    let (new_name, new_auth) = if body.path.is_some() {
+        let info = infoparse::parse_info(&new_path, &info_rules(&state, &conn)?);
+        (info.name, info.auth)
     } else {
-        cur_id
+        (cur_name, cur_auth)
     };
     if new_path != cur_path {
         let clash: Option<i64> = conn
             .query_row(
-                "SELECT pk FROM items WHERE path = ?1 AND pk != ?2",
-                params![new_path, pk],
+                "SELECT id FROM items WHERE path = ?1 AND id != ?2",
+                params![new_path, item_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -372,13 +383,13 @@ pub async fn update(
         }
     }
     conn.execute(
-        "UPDATE items SET id = ?1, path = ?2, updated_at = ?3 WHERE pk = ?4",
-        params![new_id, new_path, db::now_iso(), pk],
+        "UPDATE items SET name = ?1, auth = ?2, path = ?3, updated_at = ?4 WHERE id = ?5",
+        params![new_name, new_auth, new_path, db::now_iso(), item_id],
     )?;
     if let Some(tags) = &body.tags {
-        set_item_tags(&mut conn, pk, tags)?;
+        set_item_tags(&mut conn, item_id, tags)?;
     }
-    let item = load_item(&conn, pk)?;
+    let item = load_item(&conn, item_id)?;
     Ok(json_ok(item))
 }
 
@@ -386,14 +397,14 @@ pub async fn delete(
     state: web::Data<AppState>,
     path: web::Path<(String, i64)>,
 ) -> Result<HttpResponse, ApiError> {
-    let (repo, pk) = path.into_inner();
+    let (repo, item_id) = path.into_inner();
     let pool = state.pool_for(&repo)?;
     let conn = pool.get()?;
-    let n = conn.execute("DELETE FROM items WHERE pk = ?1", [pk])?;
+    let n = conn.execute("DELETE FROM items WHERE id = ?1", [item_id])?;
     if n == 0 {
         return Err(ApiError::not_found("item not found"));
     }
-    Ok(json_ok(serde_json::json!({ "deleted": pk })))
+    Ok(json_ok(serde_json::json!({ "deleted": item_id })))
 }
 
 #[derive(Deserialize)]
@@ -406,26 +417,26 @@ pub async fn add_tags(
     path: web::Path<(String, i64)>,
     body: web::Json<AddTags>,
 ) -> Result<HttpResponse, ApiError> {
-    let (repo, pk) = path.into_inner();
+    let (repo, item_id) = path.into_inner();
     let pool = state.pool_for(&repo)?;
     let mut conn = pool.get()?;
     let exists: Option<i64> = (&conn)
-        .query_row("SELECT pk FROM items WHERE pk = ?1", [pk], |r| r.get(0))
+        .query_row("SELECT id FROM items WHERE id = ?1", [item_id], |r| r.get(0))
         .optional()?;
     if exists.is_none() {
         return Err(ApiError::not_found("item not found"));
     }
     let mut current: Vec<i64> = (&conn)
-        .prepare("SELECT tag_id FROM item_tags WHERE item_pk = ?1")?
-        .query_map([pk], |r| r.get(0))?
+        .prepare("SELECT tag_id FROM item_tags WHERE item_id = ?1")?
+        .query_map([item_id], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for t in &body.tag_ids {
         if !current.contains(t) {
             current.push(*t);
         }
     }
-    set_item_tags(&mut conn, pk, &current)?;
-    let item = load_item(&conn, pk)?;
+    set_item_tags(&mut conn, item_id, &current)?;
+    let item = load_item(&conn, item_id)?;
     Ok(json_ok(item))
 }
 
@@ -433,15 +444,15 @@ pub async fn remove_tag(
     state: web::Data<AppState>,
     path: web::Path<(String, i64, i64)>,
 ) -> Result<HttpResponse, ApiError> {
-    let (repo, pk, tag_id) = path.into_inner();
+    let (repo, item_id, tag_id) = path.into_inner();
     let pool = state.pool_for(&repo)?;
     let conn = pool.get()?;
     let n = conn.execute(
-        "DELETE FROM item_tags WHERE item_pk = ?1 AND tag_id = ?2",
-        params![pk, tag_id],
+        "DELETE FROM item_tags WHERE item_id = ?1 AND tag_id = ?2",
+        params![item_id, tag_id],
     )?;
     if n == 0 {
         return Err(ApiError::not_found("link not found"));
     }
-    Ok(json_ok(serde_json::json!({ "deleted": { "item_pk": pk, "tag_id": tag_id } })))
+    Ok(json_ok(serde_json::json!({ "deleted": { "item_id": item_id, "tag_id": tag_id } })))
 }

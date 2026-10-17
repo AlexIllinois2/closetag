@@ -2,8 +2,8 @@ import type {
   About,
   Config,
   ConfigResponse,
-  IdGenFn,
-  IdGenPreview,
+  InfoParseFn,
+  InfoParsePreview,
   Item,
   ItemsPage,
   RepoInfo,
@@ -66,6 +66,8 @@ export const api = {
   addRepo: (path: string) => post<RepoInfo>('/repos', { path }),
   removeRepo: (id: string) => del<{ removed: string }>(`/repos/${encodeURIComponent(id)}`),
   scan: (repo: string) => post<ScanReport>(`/repos/${encodeURIComponent(repo)}/scan`),
+  /** Where the browser fetches a standalone copy of a repo's database. */
+  exportRepoUrl: (repo: string) => `/api/repos/${encodeURIComponent(repo)}/export`,
 
   tags: (repo: string) => req<Tag[]>(`/repos/${encodeURIComponent(repo)}/tags`),
   createTag: (repo: string, body: { name: string; parent_id: number | null; description?: string }) =>
@@ -79,14 +81,14 @@ export const api = {
     req<ItemsPage>(`/repos/${encodeURIComponent(repo)}/items${qs({ ...params })}`),
   createItem: (repo: string, body: { path: string; tags?: number[] }) =>
     post<Item>(`/repos/${encodeURIComponent(repo)}/items`, body),
-  updateItem: (repo: string, pk: number, body: { path?: string; tags?: number[] }) =>
-    put<Item>(`/repos/${encodeURIComponent(repo)}/items/${pk}`, body),
-  deleteItem: (repo: string, pk: number) =>
-    del<{ deleted: number }>(`/repos/${encodeURIComponent(repo)}/items/${pk}`),
-  addItemTags: (repo: string, pk: number, tagIds: number[]) =>
-    post<Item>(`/repos/${encodeURIComponent(repo)}/items/${pk}/tags`, { tag_ids: tagIds }),
-  removeItemTag: (repo: string, pk: number, tagId: number) =>
-    del<{ deleted: unknown }>(`/repos/${encodeURIComponent(repo)}/items/${pk}/tags/${tagId}`),
+  updateItem: (repo: string, itemId: number, body: { path?: string; tags?: number[] }) =>
+    put<Item>(`/repos/${encodeURIComponent(repo)}/items/${itemId}`, body),
+  deleteItem: (repo: string, itemId: number) =>
+    del<{ deleted: number }>(`/repos/${encodeURIComponent(repo)}/items/${itemId}`),
+  addItemTags: (repo: string, itemId: number, tagIds: number[]) =>
+    post<Item>(`/repos/${encodeURIComponent(repo)}/items/${itemId}/tags`, { tag_ids: tagIds }),
+  removeItemTag: (repo: string, itemId: number, tagId: number) =>
+    del<{ deleted: unknown }>(`/repos/${encodeURIComponent(repo)}/items/${itemId}/tags/${tagId}`),
 
   groups: (repo: string) => req<TagGroup[]>(`/repos/${encodeURIComponent(repo)}/groups`),
   createGroup: (repo: string, body: { name: string; includes: number[] | null; excludes?: number[]; description?: string }) =>
@@ -112,6 +114,6 @@ export const api = {
   config: () => req<ConfigResponse>('/config'),
   saveConfig: (cfg: Config) => put<{ ok: boolean }>('/config', cfg),
   about: () => req<About>('/about'),
-  idgenPreview: (path: string, rules?: IdGenFn[]) =>
-    post<IdGenPreview>('/idgen/preview', { path, rules }),
+  infoparsePreview: (path: string, rules?: InfoParseFn[]) =>
+    post<InfoParsePreview>('/infoparse/preview', { path, rules }),
 }
